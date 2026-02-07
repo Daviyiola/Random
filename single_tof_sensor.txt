@@ -1,0 +1,148 @@
+#include <Wire.h>
+#include <VL53L1X.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+/* ===== OLED CONFIG ===== */
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET   -1          // Reset pin not used on I2C OLEDs
+#define OLED_ADDR    0x3C        // Common I2C addr for 128x64 SSD1306
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+/* ===== TOF CONFIG ===== */
+VL53L1X tof;
+
+// UI throttle (avoid flicker)
+const uint32_t UI_UPDATE_MS = 50;   // ~20 FPS max
+uint32_t lastUiMs = 0;
+
+// Simple smoothing (optional)
+int16_t lastDist = -1;
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  // Start I2C on default ESP32 pins (SDA=21, SCL=22)
+  Wire.begin(21, 22);
+  Wire.setClock(100000);  // Fast-mode I2C
+
+  // --- OLED init ---
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("SSD1306 not found. Check wiring/address.");
+    while (1) delay(10);
+  }
+  display.clearDisplay();
+  drawSplash("VL53L1X + OLED");
+  delay(700);
+
+  // --- ToF init ---
+  tof.setTimeout(500);
+  if (!tof.init()) {
+    Serial.println("VL53L1X not found. Check wiring/power.");
+    showError("VL53L1X not found");
+    while (1) delay(10);
+  }
+
+  // Distance mode: Short (indoor, bright), Medium, or Long (dim, longer range)
+  tof.setDistanceMode(VL53L1X::Long);
+  // Timing budget affects accuracy vs speed (in microseconds)
+  tof.setMeasurementTimingBudget(50 * 1000);  // 50 ms
+  // Start continuous measurements every 50 ms (20 Hz)
+  tof.startContinuous(50);
+
+  Serial.println("VL53L1X running...");
+}
+
+void loop() {
+  uint32_t now = millis();
+
+  // Read sensor
+  uint16_t dist = tof.read();
+  if (tof.timeoutOccurred()) {
+    Serial.println("Timeout");
+    drawReading(-2); // special code for timeout
+    return;
+  }
+
+  // Print to serial
+  if (dist == 0xFFFF || dist == 0) {
+    Serial.println("Out of range");
+  } else {
+    Serial.print("Distance: ");
+    Serial.print(dist);
+    Serial.println(" mm");
+  }
+
+  // Update OLED at a controlled rate
+  if (now - lastUiMs >= UI_UPDATE_MS) {
+    lastUiMs = now;
+    drawReading(dist);
+  }
+}
+
+/* ===== UI helpers ===== */
+
+void drawSplash(const char* title) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(title);
+  display.drawLine(0, 10, SCREEN_WIDTH, 10, SSD1306_WHITE);
+  display.setCursor(0, 20);
+  display.println("Distance will appear here.");
+  display.display();
+}
+
+void showError(const char* msg) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("ERROR:");
+  display.setTextSize(1);
+  display.setCursor(0, 16);
+  display.println(msg);
+  display.display();
+}
+
+void drawReading(int32_t mm) {
+  display.clearDisplay();
+
+  // Header
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("VL53L1X Distance");
+
+  // Big number area
+  display.setTextSize(2);
+  display.setCursor(0, 20);
+
+  if (mm == -2) {
+    display.println("Timeout");
+  } else if (mm == 0 || mm == 0xFFFF) {
+    display.println("Out of rng");
+  } else {
+    // Format: "1234 mm"
+    char buf[20];
+    snprintf(buf, sizeof(buf), "%ld mm", (long)mm);
+    display.println(buf);
+
+    // Simple horizontal bar (0–2 m scale, adjust as needed)
+    const int maxMm = 2000;
+    int barWidth = map(constrain(mm, 0, maxMm), 0, maxMm, 0, SCREEN_WIDTH - 4);
+    display.drawRect(2, 48, SCREEN_WIDTH - 4, 12, SSD1306_WHITE);
+    display.fillRect(2, 48, barWidth, 12, SSD1306_WHITE);
+  }
+
+  // Footer hint
+  display.setTextSize(1);
+  display.setCursor(0, 38);
+  display.println("Move hand toward sensor");
+
+  display.display();
+}

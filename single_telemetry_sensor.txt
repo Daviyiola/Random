@@ -1,0 +1,215 @@
+#include <Wire.h>
+#include <DFRobot_AHT20.h>
+#include <DFRobot_ENS160.h>
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// ==========================
+// OLED Settings
+// ==========================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1          // Reset pin not used on many ESP32 boards
+#define OLED_ADDR     0x3C        // Common I2C address for SSD1306
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ==========================
+// Sensor Objects
+// ==========================
+
+// AHT20 (Temp and RH)
+DFRobot_AHT20 aht20(Wire);
+
+// ENS160 over I2C (TVOC, eCO2, AQI)
+DFRobot_ENS160_I2C ens160(&Wire, 0x53);  // 0x53 is the default ENS160 I2C address :contentReference[oaicite:1]{index=1}
+
+// Light sensor (digital output pin "DO")
+const int LIGHT_DO_PIN = 34;  // Change to whatever GPIO you wired DO to
+
+// ==========================
+// Globals
+// ==========================
+float g_tempC    = NAN;
+float g_humidity = NAN;
+uint16_t g_tvoc  = 0;
+uint16_t g_eco2  = 0;
+uint8_t  g_aqi   = 0;
+uint8_t  g_status = 0;
+
+unsigned long lastReadMs = 0;
+const unsigned long READ_INTERVAL_MS = 1000;
+
+// ==========================
+// Setup
+// ==========================
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  // If you used custom I2C pins on the ESP32, put them here.
+  // Example: Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.begin();   // default SDA=21, SCL=22 on many ESP32 boards
+
+  pinMode(LIGHT_DO_PIN, INPUT);
+
+  // -------- OLED Init --------
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("SSD1306 init failed, check wiring and address");
+  } else {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Env Monitor Booting");
+    display.display();
+  }
+
+  // -------- AHT20 Init --------
+  Serial.println("Init AHT20...");
+  while (aht20.begin()) {   // begin() returns 0 on success, non zero on failure :contentReference[oaicite:2]{index=2}
+    Serial.println("AHT20 init failed, check wiring. Retrying...");
+    delay(1000);
+  }
+  Serial.println("AHT20 OK");
+
+  // -------- ENS160 Init --------
+  Serial.println("Init ENS160...");
+  while (NO_ERR != ens160.begin()) {  // From DFRobot ENS160 example :contentReference[oaicite:3]{index=3}
+    Serial.println("ENS160 init failed, check wiring. Retrying...");
+    delay(3000);
+  }
+  Serial.println("ENS160 OK");
+
+  // Set ENS160 power mode and initial temp/hum for compensation
+  ens160.setPWRMode(ENS160_STANDARD_MODE);
+  // Start with some default values; we will update with real AHT20 readings
+  ens160.setTempAndHum(25.0, 50.0);
+
+  delay(500);
+}
+
+// ==========================
+// Main Loop
+// ==========================
+void loop() {
+  unsigned long now = millis();
+  if (now - lastReadMs >= READ_INTERVAL_MS) {
+    lastReadMs = now;
+
+    readAHT20();
+    readENS160();
+    int lightState = digitalRead(LIGHT_DO_PIN);
+    bool lightBright = (lightState == LOW);
+    printToSerial(lightBright);
+    printToOLED(lightBright);
+  }
+}
+
+// ==========================
+// Read AHT20 (Temp and RH)
+// ==========================
+void readAHT20() {
+  // Start a measurement and check if it is ready
+  if (aht20.startMeasurementReady()) {   // true when new data is ready :contentReference[oaicite:4]{index=4}
+    g_tempC    = aht20.getTemperature_C();
+    g_humidity = aht20.getHumidity_RH();
+
+    // Use AHT20 data to compensate ENS160 readings
+    ens160.setTempAndHum(g_tempC, g_humidity);
+  } else {
+    Serial.println("AHT20 measurement not ready");
+  }
+}
+
+// ==========================
+// Read ENS160 (TVOC, eCO2, AQI)
+// ==========================
+void readENS160() {
+  // Get status and air quality data
+  g_status = ens160.getENS160Status();
+  g_aqi    = ens160.getAQI();
+  g_tvoc   = ens160.getTVOC();  // ppb
+  g_eco2   = ens160.getECO2();  // ppm
+}
+
+// ==========================
+// Serial Output
+// ==========================
+void printToSerial(int lightBright) {
+  Serial.println("---- Sensor Readings ----");
+
+  Serial.print("Temp: ");
+  Serial.print(g_tempC);
+  Serial.println(" C");
+
+  Serial.print("RH:   ");
+  Serial.print(g_humidity);
+  Serial.println(" %");
+
+  Serial.print("ENS160 Status: ");
+  Serial.println(g_status);
+
+  Serial.print("AQI: ");
+  Serial.println(g_aqi);
+
+  Serial.print("TVOC: ");
+  Serial.print(g_tvoc);
+  Serial.println(" ppb");
+
+  Serial.print("eCO2: ");
+  Serial.print(g_eco2);
+  Serial.println(" ppm");
+
+  Serial.print("Light: ");
+  Serial.println(lightBright ? "BRIGHT" : "DARK");
+
+  Serial.println();
+}
+
+// ==========================
+// OLED Output
+// ==========================
+void printToOLED(int lightBright) {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+
+  // Line 1  temperature
+  display.print("T: ");
+  if (isnan(g_tempC)) {
+    display.println("--.- C");
+  } else {
+    display.print(g_tempC, 1);
+    display.println(" C");
+  }
+
+  // Line 2 humidity
+  display.print("RH: ");
+  if (isnan(g_humidity)) {
+    display.println("--.- %");
+  } else {
+    display.print(g_humidity, 1);
+    display.println(" %");
+  }
+
+  // Line 3 AQI
+  display.print("AQI: ");
+  display.println(g_aqi);
+
+  // Line 4 TVOC
+  display.print("TVOC: ");
+  display.print(g_tvoc);
+  display.println(" ppb");
+
+  // Line 5 eCO2
+  display.print("eCO2: ");
+  display.print(g_eco2);
+  display.println(" ppm");
+
+  // Line 6 Light
+  display.print("Light: ");
+  display.println(lightBright ? "BRIGHT" : "DARK");
+
+  display.display();
+}
